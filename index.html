@@ -218,22 +218,27 @@ function loadCfg() {
 }
 function parseCfg(text) {
   return text.split(/[\n,]+/).map(s => s.trim()).filter(Boolean).map(s => {
-    const m = s.match(/^(base|robinhood|unichain)\s*[:：]\s*#?(\d+)$/i);
-    return m ? {chain: m[1].toLowerCase(), id: Number(m[2])} : null;
+    // 末尾の「!」は後藤式のルールを使うポジションの印（例 base:6356815!）
+    const m = s.match(/^(base|robinhood|unichain)\s*[:：]\s*#?(\d+)\s*([!！])?$/i);
+    return m ? {chain: m[1].toLowerCase(), id: Number(m[2]), goto: !!m[3]} : null;
   }).filter(Boolean);
 }
 
 // ---------- 描画 ----------
-function card(p, d, g) {
-  const wPct = Math.round(d.width * 100);
+function card(p, d, g, goto) {
+  const wPct = ((d.hi / d.lo - 1) * 100).toFixed(1);  // 下限から上限までの幅（上下が非対称でも使える）
   const near = Math.min(Math.abs(d.toLo), Math.abs(d.toHi));
   const cls = !d.inRange ? "bad" : near < 0.05 ? "warn" : "ok";
   const label = !d.inRange ? "範囲外" : near < 0.05 ? "端まで 5% 未満" : "範囲内";
   const pos = Math.max(0, Math.min(1, Math.log(d.price / d.lo) / Math.log(d.hi / d.lo)));
   let alert = "";
   if (!d.inRange) {
-    const side = d.price < d.lo ? `下に抜けた（中身は全部 ${d.base}）` : `上に抜けた（中身は全部 ${d.quote}）`;
-    alert = `<div class="alert bad">範囲外: ${esc(side)}。決めたルールを確認してください（#6216739 は後藤式: 強い方に替えて 7 日待つ）。</div>`;
+    const down = d.price < d.lo;
+    const side = down ? `下に抜けた（中身は全部 ${d.base}）` : `上に抜けた（中身は全部 ${d.quote}）`;
+    const rule = goto
+      ? `後藤式: LP を閉じて ${down ? d.quote : d.base} に替え（Bolt 内の交換）、7 日待って同じ幅で組み直す。組み直しの予定日は lp_check の知らせで確認`
+      : "決めたルールを確認してください";
+    alert = `<div class="alert bad">範囲外: ${esc(side)}。${esc(rule)}。</div>`;
   } else if (near < 0.05) {
     alert = `<div class="alert">${Math.abs(d.toHi) < Math.abs(d.toLo) ? "上限" : "下限"}まで ${(near * 100).toFixed(1)}%。</div>`;
   }
@@ -242,7 +247,7 @@ function card(p, d, g) {
   const est = poolFees * d.share;
   return `<article class="card ${cls}">
     <div class="top">
-      <div class="name">#${p.id}（${esc(d.pair)}・${CHAINS[p.chain].name}・${p.fee / 1e4}%・±${wPct}%）</div>
+      <div class="name">#${p.id}（${esc(d.pair)}・${CHAINS[p.chain].name}・${p.fee / 1e4}%・幅 ${wPct}%${goto ? "・後藤式" : ""}）</div>
       <span class="pill ${cls}">${label}</span>
     </div>
     <div class="grid">
@@ -270,9 +275,9 @@ let busy = false;
 async function refresh() {
   if (busy) return; busy = true;
   const list = parseCfg(loadCfg());
-  $("cfg").value = list.map(x => `${x.chain}:${x.id}`).join("\n");
+  $("cfg").value = list.map(x => `${x.chain}:${x.id}${x.goto ? "!" : ""}`).join("\n");
   if (!list.length) {
-    $("list").innerHTML = `<div class="skel">表示するポジションがまだありません。下の「表示するポジション」に「base:6216739」のように書いて保存してください。</div>`;
+    $("list").innerHTML = `<div class="skel">表示するポジションがまだありません。下の「表示するポジション」に「base:123456」のように書いて保存してください（後藤式のルールを使うものは末尾に「!」）。</div>`;
     $("settings").open = true; $("stamp").textContent = "設定待ち"; busy = false; return;
   }
   $("stamp").textContent = "読み込み中…";
@@ -284,7 +289,7 @@ async function refresh() {
     const out = new Array(list.length);
     await Promise.all(Object.values(byChain).map(async items => {
       for (const x of items) {
-        try { const p = await readPosition(x.chain, x.id); out[x.i] = {p, d: describe(p, eth), g: await geckoPool(x.chain, p.pool)}; }
+        try { const p = await readPosition(x.chain, x.id); out[x.i] = {p, d: describe(p, eth), g: await geckoPool(x.chain, p.pool), goto: x.goto}; }
         catch (e) { out[x.i] = {err: `#${x.id}（${CHAINS[x.chain].name}）: 読めませんでした ${e.message}`}; }
       }
     }));
@@ -294,7 +299,7 @@ async function refresh() {
       sv += r.d.value; sf += r.d.fees; n++;
       const vol = r.g ? Number(r.g.volume_usd?.h24) : NaN;
       if (isFinite(vol)) se += vol * r.p.fee / 1e6 * r.d.share;
-      return card(r.p, r.d, r.g);
+      return card(r.p, r.d, r.g, r.goto);
     }).join("");
     $("sumValue").textContent = usd(sv, 0);
     $("sumFees").textContent = usd(sf);
